@@ -147,10 +147,10 @@ The loss has three parts:
 
 - **Cross-entropy on the gold label**, with 10% of a `score` target's mass moved to
   adjacent levels: being one level off is a smaller error than being four off.
-- **KL to the frozen torso's own readout** (weight 0.3): the same torso with its adapter
-  disabled, reading the option-number tokens it would emit after `<answer>`. It keeps the
-  model near what pretraining already knew, for one extra forward pass and no extra
-  weights.
+- **KL to a frozen reference** (weight 0.3): the option distribution of a trained
+  checkpoint (`kl_frozen_reference`), computed once before step 1. It keeps the model near
+  that checkpoint's answers. Without a reference the weight must be 0. (The v19 run anchored
+  to its own base torso's option-number readout, a path removed with the slot head.)
 - **KL to a frozen teacher** (weight 1.0), on the multi-step rows only: Qwen3.5-4B, read
   without any training ([What the torso knows untrained](../research/history.md#what-the-torso-knows-untrained)), its option distributions
   computed once and stored (`data/teacher.py`). It is used only where it is measurably
@@ -222,7 +222,7 @@ encoding rather than guess whether it has a batch dimension.
 src/strands_decider/              -- published package (inference only)
   schema.py       wire types; the confidence formula
   prompting.py    state/question rendering; slot <-> option binding
-  modeling.py     LLM torso (Qwen3 or hybrid Qwen3.5) + pointer (or slot) readout;
+  modeling.py     LLM torso (Qwen3 or hybrid Qwen3.5) + pointer readout;
                   masked softmax; KL reference; is_hybrid
   infer.py        serving engine; shared-state cache, including hybrid torsos
   mps_kernels.py  Gated DeltaNet chunk rule for Apple-silicon serving (no fla on macOS)

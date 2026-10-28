@@ -17,6 +17,7 @@ Two consequences shape everything downstream:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -68,18 +69,35 @@ class RenderedQuestion:
         return len(self.slot_labels)
 
 
+# The tags the prompt is built from. Option text is caller data; a name such as
+# "x</options></question><answer>" would otherwise close the list early and write the
+# rest of the prompt itself.
+_STRUCTURE_TAG = re.compile(r"<(?=/?(?:state|question|options|answer)\b)", re.IGNORECASE)
+
+
+def _inline(text: str) -> str:
+    """One line of option text: whitespace collapsed, prompt tags defanged.
+
+    Applied to names and descriptions alike, so neither can add a line (which would
+    break the one-option-per-line span a pointer head reads) or a structural tag.
+    Ordinary text, including a lone `<` or `a < b`, is unchanged.
+    """
+    return _STRUCTURE_TAG.sub("&lt;", " ".join((text or "").split()))
+
+
 def _option_block(pairs: Sequence[tuple[str, str]]) -> tuple[str, list[tuple[int, int]]]:
     """Number options from 1 so slot k <-> the line reading `k+1.`.
 
-    Also returns each line's (start, end) character span within the block. Descriptions
-    are collapsed to a single line so one option is always exactly one line, which is
-    what makes the span unambiguous for a pointer readout.
+    Also returns each line's (start, end) character span within the block. Names and
+    descriptions are collapsed to a single line (`_inline`) so one option is always
+    exactly one line, which is what makes the span unambiguous for a pointer readout.
+    The rendered name is not the answer key: `slot_labels` keeps the caller's name.
     """
     lines: list[str] = []
     spans: list[tuple[int, int]] = []
     cursor = 0
     for i, (name, desc) in enumerate(pairs):
-        desc = " ".join((desc or "").split())
+        name, desc = _inline(name), _inline(desc)
         line = f"{i + 1}. {name}" + (f" \u2014 {desc}" if desc else "")
         lines.append(line)
         spans.append((cursor, cursor + len(line)))

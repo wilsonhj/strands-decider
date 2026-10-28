@@ -53,11 +53,8 @@ train_files: ["data/train_v5.jsonl", "data/multistep_v14.jsonl", "data/generated
 val_fraction: 0.03
 
 base_model: "google/gemma-4-26B-A4B-it"  # Hub main 4d7ae49 on 2026-10-06; the loader does not pin it
-num_slots: 24           # must match `data build --max-options`; also the KL reference width
-head_type: "pointer"    # scores each option from its own hidden state; see modeling.PointerHead
 pointer_dim: 256
-head_init: "random"     # "lm_head" seeding applies to the slot head only
-kl_frozen_weight: 0.3   # KL(frozen || student) over the option-number readout
+kl_frozen_weight: 0.3   # KL(reference || student) weight; needs kl_frozen_reference + precompute_frozen_kl
 kl_frozen_reference: "checkpoints/v19-ref"  # the released v19, at temperature 1 (header)
 # The frozen 4B's distributions on the short-task rows where it agrees with the gold label
 # (indices into train_v5), and v14's own on the multi-step rows (offset past train_v5);

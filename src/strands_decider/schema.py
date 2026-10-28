@@ -19,6 +19,7 @@ What differs is only how many slots there are and how the distribution is read b
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -26,6 +27,16 @@ from pydantic import BaseModel, Field, field_validator
 # A `state` or `instructions` may be a bare string, or structured data that we
 # render deterministically (see strands_decider.prompting.render_content).
 Content = str | dict[str, Any] | list[Any]
+
+
+class RequestError(ValueError):
+    """The request is invalid for this engine. The server answers it with 422.
+
+    A bare ValueError is not mapped to 422: it may come from inside the model, and
+    reporting that as the caller's mistake would hide a server fault. Raise this for
+    anything the caller can fix by changing the request.
+    """
+
 
 MAX_CHOICE_OPTIONS = 255
 MIN_SCORE_LEVELS = 2
@@ -158,6 +169,10 @@ def derive_score_confidence(probabilities: list[float], *, ordinal_smoothing: fl
     automatically" threshold unreachable by construction -- which is exactly the bug
     this replaced.
     """
+    # A NaN or inf means the forward pass went wrong. Reporting that as certain would
+    # tell the caller to act automatically on garbage, so it is "no confidence".
+    if not all(math.isfinite(x) for x in probabilities):
+        return 0.0
     n = len(probabilities)
     if n <= 1:
         return 1.0
@@ -187,8 +202,12 @@ def derive_confidence(probabilities: list[float]) -> float:
 
     Uniform -> 0.0, one-hot -> 1.0, independent of N so thresholds mean the same
     thing for a 3-option and a 10-option question. For N == 1 the answer is forced,
-    so confidence is 1.0 by definition.
+    so confidence is 1.0 by definition. Any non-finite probability gives 0.0.
     """
+    # max() is order-dependent with NaN, and inf would clamp to 1.0: neither is a
+    # distribution, so neither earns any confidence.
+    if not all(math.isfinite(x) for x in probabilities):
+        return 0.0
     n = len(probabilities)
     if n <= 1:
         return 1.0

@@ -1,12 +1,12 @@
-"""Image evaluation: Strands Decider (v19) over images, against two baselines.
+"""Image evaluation: Strands Decider (v19) over images, against one baseline.
 
 Systems, each also scored "blind" (the image removed) to measure image dependence:
 
   strands   Strands Decider (v19) loaded with `--vision` (`VisionDeciderModel.load`):
             its adapter and head unchanged, the vision tower kept. Temperatures per
             question kind applied as the server applies them.
-  qwen      Qwen3.5-2B-Base untrained, read the way the KL reference reads it: the
-            frozen torso's option-number logits at <answer>, image in <state>.
+  (qwen     removed: the untrained Qwen3.5-2B-Base baseline read the torso's option-number
+            logits through the slot head's grid, which the pointer head does not have.)
   mapika    Mapika/decider-2b-vision through its own code (letter logits at an answer
             slot, its own prompt, images <= 768 px), for comparison.
 
@@ -21,7 +21,7 @@ Every item is one question about one image, so each is forwarded whole (state + 
 (tests/test_vision.py). Results stream to <out>/<system>.jsonl; <out>/summary.json is
 rewritten after each system.
 
-    python evaluation/vision/run.py --out results --systems strands,qwen,mapika \\
+    python evaluation/vision/run.py --out results --systems strands,mapika \\
         --nb-groups 300 --pope 600 [--ijb-jsonl ijb_preview.jsonl]
 
 The recorded runs behind docs/vision.md, made with this script, are published as a
@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metrics import image_dependence, naturalbench_paired, summarise
 
 from strands_decider.infer import _option_token_index
-from strands_decider.modeling import StrandsDeciderConfig, masked_log_softmax
+from strands_decider.modeling import masked_log_softmax
 from strands_decider.prompting import render_question
 from strands_decider.schema import ChoiceQuestion, NoulQuestion, Question
 from strands_decider.vision import (
@@ -278,49 +278,6 @@ class Strands(_DeciderSystem):
         return [float(p[s]) for s in self._gold_slot(rq, it)]
 
 
-class QwenUntrained(_DeciderSystem):
-    name = "qwen-untrained"
-
-    def __init__(self, base: str = BASE, dtype: str = "float32", device: str = "cpu") -> None:
-        from huggingface_hub import snapshot_download
-        from transformers import AutoTokenizer
-
-        if base == BASE:
-            base = snapshot_download(BASE, revision=BASE_REV)
-
-        cfg = StrandsDeciderConfig(
-            base_model=base, use_lora=False, head_type="pointer", torch_dtype=dtype, max_length=4096
-        )
-        tok = AutoTokenizer.from_pretrained(base)
-        self.device = device
-        self.model = (
-            VisionDeciderModel(cfg, VisionDeciderModel._load_torso(cfg, None, None), tok)
-            .to(device)
-            .eval()
-        )
-        super().__init__(base)
-
-    def _question(self, it: dict[str, Any]) -> Question:
-        if it["kind"] == "noul":
-            return NoulQuestion(
-                instructions=it["question"],
-                criteria={"false": "the answer is no", "true": "the answer is yes"},
-            )
-        return ChoiceQuestion(instructions=it["question"], criteria=dict(it["options"]))
-
-    @torch.no_grad()
-    def probs(self, it: dict[str, Any], blind: bool) -> list[float]:
-        rq, ids, _, mm = self._inputs(it, blind)
-        lp, _ = self.model.frozen_slot_log_probs(
-            ids,
-            torch.ones_like(ids),
-            torch.tensor([rq.n_slots], device=self.device),
-            pixel_values=mm.get("pixel_values"),
-            image_grid_thw=mm.get("image_grid_thw"),
-        )
-        return [float(lp[0, s].exp()) for s in self._gold_slot(rq, it)]
-
-
 class Mapika:
     """Mapika/decider-2b-vision through its own code (one image, <= 10 options)."""
 
@@ -458,7 +415,7 @@ def _versions() -> dict[str, Any]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--systems", default="strands,qwen,mapika")
+    ap.add_argument("--systems", default="strands,mapika", help="comma list of: strands, mapika")
     ap.add_argument("--nb-groups", type=int, default=300)
     ap.add_argument("--pope", type=int, default=600)
     ap.add_argument(
@@ -473,6 +430,16 @@ def main() -> None:
         help="the strands system's checkpoint: v19 by default, or a fine-tuned one",
     )
     a = ap.parse_args()
+    wanted = a.systems.split(",")
+    if "qwen" in wanted:
+        ap.error(
+            "system 'qwen' is removed: the untrained-base baseline read the torso's option-number "
+            "logits through the slot head's grid, which the pointer head does not have. "
+            "Use --systems strands,mapika."
+        )
+    unknown = [n for n in wanted if n not in ("strands", "mapika")]
+    if unknown:
+        ap.error(f"unknown system(s) {unknown}; choose from strands, mapika")
     os.makedirs(a.out, exist_ok=True)
     items = (list(naturalbench(a.nb_groups, a.nb_local)) if a.nb_groups else []) + (
         list(pope(a.pope, a.pope_local)) if a.pope else []
@@ -482,12 +449,11 @@ def main() -> None:
     print(f"[vision-eval] {len(items)} items", flush=True)
     systems = {
         "strands": lambda: Strands(a.checkpoint, device=a.device),
-        "qwen": lambda: QwenUntrained(device=a.device),
         "mapika": lambda: Mapika(device=a.device),
     }
     all_res: dict[str, list[dict[str, Any]]] = {}
     errors: dict[str, str] = {}
-    for name in a.systems.split(","):
+    for name in wanted:
         try:
             all_res.update(run_system(systems[name](), items, a.out))
         except Exception:

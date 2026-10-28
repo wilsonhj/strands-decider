@@ -5,12 +5,12 @@ reads the question answers "which option is listed first?" with the first option
 "which option does this text NOT fit?" with something other than the state's class. A
 model that learned to classify the state gives the same answer to every question.
 
-Each checkpoint is scored twice on identical prompts: through its trained readout, and
-with its adapter disabled through the frozen torso's option-number tokens -- so every
-run carries its own untrained baseline. `--torso-tokens` adds a third reading, adapter
-on but token readout, to separate the trained torso from the trained head.
+Each checkpoint is scored through its trained pointer readout on identical prompts.
+The untrained baseline of the first runs below (the frozen torso's option-number tokens,
+adapter disabled) read the removed slot head's grid, so it no longer exists and
+`--torso-tokens` is refused; compare two checkpoints instead.
 
-First run (v7, v8), on held-out choice tasks:
+First run (v7, v8, slot head), on held-out choice tasks:
 
                                             frozen base    v7     chance
     "listed first?"  accuracy                  0.700      0.080   0.184
@@ -22,7 +22,7 @@ that the question never changes the answer. Lower "same as real" is better; so i
 lower capture on NOT and higher accuracy on first / last.
 
     python -m evaluation.question_sensitivity CHECKPOINT [CHECKPOINT ...] [--n 200]
-        [--torso-tokens] [--out results.json]
+        [--out results.json]
 """
 
 import argparse
@@ -35,12 +35,7 @@ warnings.filterwarnings("ignore")
 import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
-from strands_decider.modeling import (  # noqa: E402
-    MASK_VALUE,
-    StrandsDeciderModel,
-    masked_log_softmax,
-    pool_last_token,
-)
+from strands_decider.modeling import StrandsDeciderModel  # noqa: E402
 from strands_decider.prompting import NOUL_DEFAULT_CRITERIA, NOUL_SLOT_LABELS  # noqa: E402
 from training.data.collate import CollatorConfig, SystemOneCollator  # noqa: E402
 from training.data.format import Example  # noqa: E402
@@ -149,23 +144,17 @@ def build_items(n_per_task: int, seed: int = 0):
 
 
 @torch.no_grad()
-def readouts(ckpt: str, items, torso_tokens: bool):
-    """Argmax per prompt: trained readout, frozen token readout, optionally adapter-on tokens."""
+def readouts(ckpt: str, items):
+    """Argmax per prompt through the checkpoint's trained pointer readout."""
     model = StrandsDeciderModel.load(ckpt).eval().to("cuda")
     coll = SystemOneCollator(
         model.tokenizer,
-        CollatorConfig(
-            max_length=model.config.max_length,
-            num_slots=model.config.num_slots,
-            head_type=model.config.head_type,
-        ),
+        CollatorConfig(max_length=model.config.max_length),
         train=False,
     )
     loader = DataLoader(
         ExampleDataset([it[3] for it in items]), batch_size=16, shuffle=False, collate_fn=coll
     )
-    slots = model.slot_token_ids()
-    rows = model._output_embedding()[[slots[k] for k in sorted(slots)]].float()
     out = defaultdict(list)
     name = ckpt.rstrip("/\\").split("/")[-1].split("\\")[-1]
     for batch in loader:
@@ -178,20 +167,6 @@ def readouts(ckpt: str, items, torso_tokens: bool):
             temperature=1.0,
         )
         out[name] += res["log_probs"].argmax(-1).tolist()
-        lp, ok = model.frozen_slot_log_probs(
-            batch["input_ids"], batch["attention_mask"], batch["n_slots"]
-        )
-        assert bool(ok.all()), "frozen readout needs <= 9 options"
-        out[f"{name} frozen"] += lp.argmax(-1).tolist()
-        if torso_tokens:
-            h = model.encode(batch["input_ids"], batch["attention_mask"])
-            logits = pool_last_token(h, batch["attention_mask"]).float() @ rows.t()
-            logits = torch.nn.functional.pad(
-                logits, (0, model.config.num_slots - logits.size(-1)), value=MASK_VALUE
-            )
-            out[f"{name} torso+tok"] += (
-                masked_log_softmax(logits, batch["n_slots"]).argmax(-1).tolist()
-            )
     del model
     torch.cuda.empty_cache()
     return dict(out)
@@ -247,15 +222,25 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("checkpoints", nargs="+")
     ap.add_argument("--n", type=int, default=200, help="examples per task")
-    ap.add_argument("--torso-tokens", action="store_true")
+    ap.add_argument(
+        "--torso-tokens",
+        action="store_true",
+        help="removed: the option-number token readout belonged to the slot head",
+    )
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    if args.torso_tokens:
+        ap.error(
+            "--torso-tokens is removed: it read the torso's option-number tokens through the "
+            "slot head's grid, which the pointer head does not have, so there is no untrained "
+            "baseline to score. Compare checkpoints instead."
+        )
 
     items = build_items(args.n)
     print(f"{len(items)} prompts")
     preds = {}
     for ckpt in args.checkpoints:
-        preds.update(readouts(ckpt, items, args.torso_tokens))
+        preds.update(readouts(ckpt, items))
     report = summarise(items, preds)
     print_report(report, list(preds))
     if args.out:

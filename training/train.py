@@ -27,6 +27,7 @@ import typer
 from torch.utils.data import DataLoader, Dataset
 
 from strands_decider.modeling import (
+    SLOT_ERA_KEYS,
     StrandsDeciderConfig,
     StrandsDeciderModel,
     checkpoint_dir,
@@ -172,7 +173,7 @@ class TrainConfig:
 
 # Slot-era TrainConfig keys the current dataclass no longer carries. Dropped silently by
 # from_yaml so a published recipe still parses; a typo in any other key raises.
-RETIRED_YAML_KEYS = frozenset({"num_slots", "head_type", "head_hidden", "head_init"})
+RETIRED_YAML_KEYS = SLOT_ERA_KEYS | {"head_type"}
 
 
 # The fields of a TrainConfig that a checkpoint fixes: with init_from they are the checkpoint's.
@@ -457,6 +458,8 @@ def train(cfg: TrainConfig) -> str:
         raise ValueError("kl_frozen_weight > 0 needs kl_frozen_reference (a trained checkpoint)")
     if cfg.kl_frozen_reference and not (cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0):
         raise ValueError("kl_frozen_reference needs kl_frozen_weight > 0 and precompute_frozen_kl")
+    if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0 and not cfg.group_by_length:
+        raise ValueError("precompute_frozen_kl needs group_by_length (a known batch order)")
     if cfg.host_embeddings and world > 1:  # DDP refuses a module with parameters on the CPU
         raise ValueError("host_embeddings is for one GPU; under torchrun keep the table on the GPU")
     torch.manual_seed(cfg.seed)
@@ -611,18 +614,19 @@ def train(cfg: TrainConfig) -> str:
         with open(os.path.join(cfg.output_dir, "train_config.json"), "w", encoding="utf-8") as fh:
             json.dump(asdict(cfg), fh, indent=2)
     if world > 1:  # each rank iterates its share of every step's rows instead
-        # 0 for kl_slots: all rows are eligible under a pointer-head reference, so no
-        # eligibility counter is needed in StepSlices.
-        train_loader = distributed.StepSlices(train_loader, 0, cfg.grad_accum, total_steps)
+        # Every row is covered by a pointer-head frozen-KL reference, so StepSlices takes
+        # no eligibility bound: each slice's KL share is its fraction of the micro-batch's rows.
+        train_loader = distributed.StepSlices(train_loader, cfg.grad_accum, total_steps)
 
     refs = None
     if cfg.precompute_frozen_kl and cfg.kl_frozen_weight > 0:
-        if not cfg.group_by_length:
-            raise ValueError("precompute_frozen_kl needs group_by_length (a known batch order)")
         run = [b for e in range(cfg.epochs) for b in sampler.batches(e)]
         t_ref = time.time()
         model.train()
-        assert cfg.kl_frozen_reference is not None  # enforced by _validate above
+        if cfg.kl_frozen_reference is None:  # unreachable past the checks at the top of train()
+            raise ValueError(
+                "kl_frozen_weight > 0 needs kl_frozen_reference (a trained checkpoint)"
+            )
         ref_model = StrandsDeciderModel.load(
             cfg.kl_frozen_reference, attn_implementation=cfg.attn_implementation
         )
@@ -672,7 +676,8 @@ def train(cfg: TrainConfig) -> str:
             )
             step_loss = out["loss"] * part.weights
             if cfg.kl_frozen_weight > 0:
-                assert refs is not None  # populated above when kl_frozen_weight > 0
+                if refs is None:  # unreachable past the checks at the top of train()
+                    raise ValueError("kl_frozen_weight > 0 needs precompute_frozen_kl")
                 m, a = (part.micro, part.start) if world > 1 else (micro, 0)
                 ref_lp = refs[m, a : a + batch["labels"].numel()]
                 stu = out["log_probs"]

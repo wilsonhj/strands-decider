@@ -127,8 +127,8 @@ experts, top 8) beside a dense MLP. LoRA attaches by module name, so it reaches 
 and the dense MLP. The experts are stored as 3-D parameters, not as linear modules, and
 neither they nor the router get an adapter: they keep their base weights.
 
-The frozen option-number readout and the teacher labeller apply Gemma's final logit
-soft-cap, so both read the model's own distribution. At serving time, a 32,768-token
+The teacher labeller applies Gemma's final logit soft-cap, so it reads the model's own
+distribution. At serving time, a 32,768-token
 window with several long questions in one forward can run a Gemma torso out of memory:
 `strands-decider serve --max-batch-tokens N` caps the tokens of one forward
 ([Serve](../docs/inference.md#serve)).
@@ -172,16 +172,19 @@ one pass before step 1 instead of a second forward every step, which changes onl
 rounding. Neither fits a 24 GB card, so the committed configs keep them off.
 
 **A trained checkpoint as the frozen-KL reference.** `kl_frozen_reference: <checkpoint>`
-replaces the untouched torso's option-number readout with that checkpoint's own option
-distribution, at temperature 1 and without its calibration. The same rows get the term (at
-most as many options as the readout covers), weighted by `kl_frozen_weight` as before. It
-needs `precompute_frozen_kl: true` and `kl_frozen_weight > 0`: the reference is loaded
-once, fills the table before step 1, and is freed before training starts. The
+is the anchor of the frozen-KL term: that checkpoint's own option distribution, at
+temperature 1 and without its calibration. Every training row gets the term, weighted by
+`kl_frozen_weight`; the reference sizes its table to the run's widest option count. There
+is no other anchor: `kl_frozen_weight > 0` without `kl_frozen_reference` raises a
+`ValueError` before training starts, as does `kl_frozen_reference` without
+`precompute_frozen_kl: true` and `kl_frozen_weight > 0`. `precompute_frozen_kl` also needs
+`group_by_length: true`. The reference is loaded once, fills the table before step 1, and
+is freed before training starts. The
 checkpoint may use another tokenizer than the student, for example a Qwen3.5 reference for
 a Gemma 4 student. The reference renders each row with its own tokenizer. The collator
 draws option order and instruction phrasing from its seed before it tokenises, so the
-reference sees every row with the same options in the same slots as the student. Unset, the
-default, training is unchanged.
+reference sees every row with the same options in the same order as the student. Unset,
+the default, there is no frozen-KL term and training is unchanged.
 
 **KL direction.** `kl_direction: reverse` turns both KL terms, the teacher's and the frozen
 anchor's, from KL(target || student), which covers the target's mass, into KL(student ||
@@ -203,7 +206,7 @@ as shipped, changes it by 0.44.
 
 `init_from: <checkpoint>` starts training from a trained checkpoint instead of the base
 model, and trains it on your rows. The checkpoint is a Hub id or a local directory. Its
-LoRA adapter and its head, pointer or slot, start from their trained values, and both
+LoRA adapter and its pointer head start from their trained values, and both
 train. The torso is not frozen, and `gradient_checkpointing` applies as usual. It works
 under `torchrun` as a run from the base model does.
 
@@ -224,8 +227,8 @@ python -m training.train --config my-finetune.yaml
 python -m training.evaluate calibrate checkpoints/my-e4b --data <held-out rows>
 ```
 
-- **The checkpoint fixes the architecture.** `base_model`, `num_slots`, `head_type`,
-  `pointer_dim`, `head_hidden`, `use_lora`, `lora_r`, `lora_alpha`, `lora_targets` and
+- **The checkpoint fixes the architecture.** `base_model`,
+  `pointer_dim`, `use_lora`, `lora_r`, `lora_alpha`, `lora_targets` and
   `force_bos` come from the checkpoint's `strands_decider_config.json`. Leave them out of
   the config. A config that sets one of them to another value stops before the model loads,
   with one error that names every such key. A key in the YAML file counts as set even at its
@@ -241,8 +244,9 @@ python -m training.evaluate calibrate checkpoints/my-e4b --data <held-out rows>
 - **The frozen-KL anchor.** With `kl_frozen_reference` set to the `init_from` checkpoint,
   the KL term starts near 0 (exactly 0 with dropout off) and keeps the fine-tune close to
   the released model's answers.
-  Without `kl_frozen_reference`, the anchor is the base torso's own option-number readout,
-  with the adapter disabled, as in a run from the base model.
+  Without `kl_frozen_reference`, `kl_frozen_weight` must stay 0: a positive weight with no
+  reference raises a `ValueError`, because the pointer head has no base-torso readout to
+  anchor to.
 - **The result is a normal checkpoint**: `strands-decider serve` and `ask`,
   `python -m training.evaluate` and `training.soup` read it. To soup fine-tunes, train
   several seeds with one config (the same `init_from` and settings, other `seed` values):
@@ -250,7 +254,7 @@ python -m training.evaluate calibrate checkpoints/my-e4b --data <held-out rows>
   of N fine-tunes of a rank-R checkpoint has rank N·R: three seeds on a rank-48
   soup give a rank-144 adapter.
 - `freeze_torso: true` trains the head alone, on the checkpoint's frozen adapter.
-  `head_init` must stay `random`: the trained head is kept.
+  The trained head is kept.
 
 ## Usage
 

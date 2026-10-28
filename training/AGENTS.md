@@ -258,7 +258,7 @@ for a run that claims to reproduce it.
 ## 6. Export and publish a checkpoint
 
 **When.** A retrain to keep. The export is a Hugging Face model-repo folder: no pickles
-(`slot_head.pt` becomes `head.safetensors`, tensors checked), everything else copied byte
+(the head is `head.safetensors`, tensors checked; a legacy local `slot_head.pt` is converted to it, see the `hf_export` docstring), everything else copied byte
 for byte, a model card with provenance, and `MANIFEST.sha256` written last. Exporting the
 same inputs twice gives the same bytes. The export never changes weights. Nothing in it
 talks to the Hub.

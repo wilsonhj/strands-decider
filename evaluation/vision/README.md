@@ -12,7 +12,7 @@ records the revisions and library versions it used.
 
 ```bash
 pip install -e ".[vision]" torchvision pandas pyarrow jinja2   # torchvision: the mapika system
-python evaluation/vision/run.py --out results --systems strands,qwen,mapika \
+python evaluation/vision/run.py --out results --systems strands,mapika \
     --nb-groups 300 --pope 600 --ijb-jsonl ijb_preview.jsonl
 ```
 

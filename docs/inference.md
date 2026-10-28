@@ -124,7 +124,7 @@ writes them, `python -m training.evaluate calibrate` adds the temperatures, and 
 | --- | --- |
 | `strands_decider_config.json` | The model configuration: the base model name, the readout type and size, the window (`max_length`) and the fitted temperatures. A checkpoint saved before the rename, such as the published v19, holds `hobson_config.json` instead; `load` reads either |
 | `lora/` | The LoRA adapter (`adapter_config.json`, `adapter_model.safetensors`) |
-| `slot_head.pt` or `head.safetensors` | The readout weights. `save_pretrained` writes `slot_head.pt`. An export from `training.hf_export` holds `head.safetensors` instead. |
+| `head.safetensors` | The readout weights, written by `save_pretrained` and carried through by `training.hf_export`. An old local checkpoint may hold `slot_head.pt` instead (the pre-rename pickle name of the pointer head); `load` reads it with a warning, and re-saving writes `head.safetensors`. |
 | `tokenizer.json`, `tokenizer_config.json` | The tokenizer |
 | `chat_template.jinja` | The chat template, saved with the tokenizer. Inference does not read it. |
 

@@ -54,6 +54,15 @@ def serving_attn_implementation(torso_cfg: Any) -> str | None:
     return "eager" if kv_heads == 1 else None
 
 
+# Architecture keys of the removed slot head. TrainConfig YAMLs and the saved JSON of
+# slot-era checkpoints still carry them; both parsers drop them silently and raise on any
+# other unknown key.
+SLOT_ERA_KEYS = frozenset({"num_slots", "head_hidden", "head_init"})
+# The model config's retired keys: the slot-era ones plus the frozen-KL weight, which the
+# training config still owns but a saved model config no longer reads.
+RETIRED_CONFIG_KEYS = SLOT_ERA_KEYS | {"kl_frozen_weight"}
+
+
 @dataclass
 class StrandsDeciderConfig:
     base_model: str = "Qwen/Qwen3-1.7B-Base"
@@ -127,9 +136,12 @@ class StrandsDeciderConfig:
             raise ValueError(
                 f"{path}: head_type={head_type!r}; this version loads pointer-head checkpoints only"
             )
-        # Drop any key the current dataclass does not know (e.g. legacy head_type="pointer",
-        # num_slots, head_hidden, head_init, kl_frozen_weight on a released config).
+        # Drop only the retired slot-era keys that released configs still carry; any other
+        # key the dataclass does not know (a typo, a field from a newer version) raises.
         allowed = set(cls.__dataclass_fields__)
+        unknown = sorted(k for k in d if k not in allowed and k not in RETIRED_CONFIG_KEYS)
+        if unknown:
+            raise ValueError(f"{path}: unknown config key(s) {unknown}")
         d = {k: v for k, v in d.items() if k in allowed}
         return cls(**d)
 
@@ -610,6 +622,7 @@ def load_head_state(path: str) -> dict[str, torch.Tensor]:
     `slot_head.pt` is read as a fallback (pointer heads were pickled under that filename
     too). Raises FileNotFoundError if neither is present."""
     st = os.path.join(path, "head.safetensors")
+    # Intentional: head.safetensors wins over a stale slot_head.pt left beside it.
     if os.path.exists(st):
         from safetensors.torch import load_file
 

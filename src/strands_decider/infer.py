@@ -45,6 +45,7 @@ from .schema import (
     Content,
     NoulAnswer,
     Question,
+    RequestError,
     ScoreAnswer,
     SystemOneRequest,
     SystemOneResponse,
@@ -72,6 +73,12 @@ class EngineConfig:
     # cut and scored independently, so answers only move by float rounding; long-context
     # Gemma torsos need it at a 32,768 window. None: off.
     max_batch_tokens: int | None = None
+
+
+# The most characters one token plausibly covers, with a wide margin (real tokens average a
+# few; long runs of one character are the outliers). It bounds the text that is handed to the
+# tokeniser while `_tok_lock` is held, so one huge state cannot stall every other request.
+_MAX_CHARS_PER_TOKEN = 32
 
 
 class UnforkableCache(TypeError):
@@ -228,6 +235,17 @@ class SystemOneEngine:
         concurrently on one engine, so engine state would be shared across requests.
         """
         max_len = self.model.config.max_length
+        # Limit the text BEFORE taking the lock. A state of millions of characters cannot
+        # fit the window; tokenising all of it only to throw nearly all of it away would
+        # hold the lock (and so every other request's tokenisation) for that whole time.
+        max_chars = max_len * _MAX_CHARS_PER_TOKEN
+        if len(state_text) > max_chars:
+            if self.cfg.strict_window:
+                raise RequestError(
+                    f"state of {len(state_text):,} characters exceeds the context window "
+                    f"of {max_len} tokens"
+                )
+            state_text = state_text[:max_chars]
         with self._tok_lock:
             enc = self.tok(question_texts, add_special_tokens=False, return_offsets_mapping=True)
             q = enc["input_ids"]
@@ -236,7 +254,7 @@ class SystemOneEngine:
             if self.cfg.strict_window:
                 s = self.tok(state_text, add_special_tokens=True)["input_ids"]
                 if len(s) + longest > max_len:
-                    raise ValueError(
+                    raise RequestError(
                         f"prompt of {len(s) + longest} tokens exceeds the context window "
                         f"of {max_len} tokens"
                     )
@@ -382,7 +400,7 @@ class SystemOneEngine:
 
     def evaluate(self, request: SystemOneRequest) -> SystemOneResponse:
         if request.images:
-            raise ValueError("this engine has no vision tower; serve with --vision for images")
+            raise RequestError("this engine has no vision tower; serve with --vision for images")
         names = list(request.questions.keys())
         questions: list[Question] = [request.questions[n] for n in names]
 
@@ -494,7 +512,7 @@ def _option_token_index(
             if lo >= a and hi <= b:
                 last = j
         if last < 0:
-            raise ValueError(
+            raise RequestError(
                 f"option span ({a},{b}) has no tokens left; the prompt was "
                 "truncated through its option list"
             )

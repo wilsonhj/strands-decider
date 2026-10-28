@@ -120,8 +120,7 @@ tensor by tensor:
   head's logit is a dot product q · k, unchanged by any rotation of the q/k space, so heads
   initialised independently have unrelated bases and averaging their tensors gives a
   different, wrong head. Each head's LayerNorm is folded into its q and k projections and
-  the heads are stacked (pointer_dim N · d). A linear slot head is averaged directly; an
-  MLP slot head stacks its hidden units.
+  the heads are stacked (pointer_dim N · d). A slot-head checkpoint is rejected.
 - **Temperatures** are reset to 1: the seeds' fitted temperatures do not describe the soup,
   so calibrate it before you evaluate or serve it.
 

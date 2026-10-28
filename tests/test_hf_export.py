@@ -147,6 +147,45 @@ def test_export_is_pickle_free_loadable_and_deterministic(tmp_path):
     assert "eval: [2] gen:numbers" in summ["internal"]
 
 
+def test_a_legacy_pickled_head_is_exported_as_head_safetensors(tmp_path):
+    """A local checkpoint trained before the slot-head removal holds `slot_head.pt`, which
+    load_head_state still reads; the export carries the same tensors as head.safetensors and
+    holds no pickle, and the checkpoint is left as it was."""
+    ckpt = tmp_path / "ckpt"
+    head = _ckpt(str(ckpt))
+    os.remove(ckpt / "head.safetensors")
+    torch.save(head, ckpt / "slot_head.pt")
+    before = hf_export.fingerprint(str(ckpt))
+    out = tmp_path / "out"
+    with pytest.warns(UserWarning, match="slot_head.pt"):
+        assert _export(tmp_path, ckpt, out) == "written"
+    hf_export.verify(str(out))
+    assert "slot_head.pt" not in hf_export.files(str(out))
+    assert not any(hf_export.is_pickle(str(out / p)) for p in hf_export.files(str(out)))
+    back = load_head_state(str(out))
+    assert set(back) == set(head) and all(torch.equal(back[k], head[k]) for k in head)
+    assert hf_export.fingerprint(str(ckpt)) == before
+    assert not (ckpt / "head.safetensors").exists()
+
+
+def test_head_safetensors_wins_over_a_stale_pickled_head_in_the_export(tmp_path):
+    ckpt = tmp_path / "ckpt"
+    head = _ckpt(str(ckpt))
+    torch.save({k: v + 1 for k, v in head.items()}, ckpt / "slot_head.pt")
+    out = tmp_path / "out"
+    assert _export(tmp_path, ckpt, out) == "written"
+    back = load_head_state(str(out))
+    assert all(torch.equal(back[k], head[k]) for k in head)
+
+
+def test_a_checkpoint_with_no_head_at_all_is_refused(tmp_path):
+    ckpt = tmp_path / "ckpt"
+    _ckpt(str(ckpt))
+    os.remove(ckpt / "head.safetensors")
+    with pytest.raises(SystemExit, match=r"head\.safetensors"):
+        _export(tmp_path, ckpt, tmp_path / "out")
+
+
 def test_every_eval_set_keeps_its_own_name_on_the_hub(tmp_path):
     """The Hub groups eval results by (task, dataset type, config, split, revision), not
     by dataset name. Two arms or two sets with the same key merge under the first name.

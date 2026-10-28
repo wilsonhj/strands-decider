@@ -117,10 +117,10 @@ def soup(checkpoints: list[str], out: str, replace: bool = False) -> str:
         raise ValueError("no checkpoints")
     _check_paths(checkpoints, out, replace)
     n = len(checkpoints)
-    # from_json drops stale slot-era keys (num_slots, head_type="pointer", head_hidden,
-    # head_init, kl_frozen_weight) that pre-PR and v1-2610 pointer checkpoints still carry,
-    # and rejects head_type="slot" cleanly so a slot-era input stops here rather than
-    # halfway through, after soup has written an adapter file.
+    # from_json drops stale keys that pre-pointer-only and v1-2610 checkpoints still carry
+    # (num_slots, head_type="pointer", head_hidden, head_init, kl_frozen_weight), and
+    # rejects head_type="slot" cleanly so a slot-era input stops here rather than halfway
+    # through, after soup has written an adapter file.
     typed = [StrandsDeciderConfig.from_json(config_path(c)) for c in checkpoints]
     cfgs = [asdict(c) for c in typed]
     recipe = [{k: v for k, v in c.items() if k not in FITTED | {"base_revision"}} for c in cfgs]

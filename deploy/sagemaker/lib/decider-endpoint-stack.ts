@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 import * as path from "path";
-import { CfnOutput, IgnoreMode, RemovalPolicy, Stack, StackProps } from "aws-cdk-lib";
+import { Annotations, CfnOutput, IgnoreMode, RemovalPolicy, Stack, StackProps } from "aws-cdk-lib";
 import * as codebuild from "aws-cdk-lib/aws-codebuild";
 import * as ecrAssets from "aws-cdk-lib/aws-ecr-assets";
 import * as iam from "aws-cdk-lib/aws-iam";
@@ -24,6 +24,14 @@ export function endpointNameFor(model: string): string {
   }
   return name;
 }
+/**
+ * Whether a model revision is a full 40-character git commit sha. A branch (`main`) or a tag can
+ * be moved to different weights after you chose it; a commit sha cannot.
+ */
+export function isCommitSha(revision: unknown): boolean {
+  return typeof revision === "string" && /^[0-9a-f]{40}$/i.test(revision);
+}
+
 const GPU_AMI_VERSION = "al2023-ami-sagemaker-inference-gpu-4-1";
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
@@ -95,6 +103,18 @@ export class DeciderEndpointStack extends Stack {
     const modelId: string = ctx("model");
     const instanceType: string = ctx("instance_type");
     const device = deviceFor(instanceType);
+
+    // Not an error: the default is "main" and a first deploy should work. But what runs in the
+    // endpoint is whatever the revision points to when the model is fetched, so say so.
+    const revision = ctx("model_revision");
+    if (!isCommitSha(revision)) {
+      Annotations.of(this).addWarningV2(
+        "strands-decider:unpinned-model-revision",
+        `model_revision ${JSON.stringify(revision)} is not a 40-character commit sha. A branch or ` +
+          `tag can be moved to different weights, and the next deploy would fetch them. Pin a sha ` +
+          `with -c model_revision=<sha> (deploy/sagemaker/README.md).`,
+      );
+    }
 
     // The model, copied from the Hugging Face Hub into a private bucket during `cdk deploy`.
     // SageMaker copies it from there to /opt/ml/model on each instance (ModelDataSource below).

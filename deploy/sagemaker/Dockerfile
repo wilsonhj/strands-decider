@@ -46,4 +46,5 @@ ENV DECIDER_CHECKPOINT=/opt/ml/model/checkpoint \
 
 EXPOSE 8080
 # SageMaker runs `docker run IMAGE serve`; that trailing `serve` becomes $0 and is ignored.
+# $DECIDER_ARGS is unquoted on purpose (it splits into options); the operator sets it, never a request.
 ENTRYPOINT ["sh", "-c", "exec strands-decider serve \"$DECIDER_CHECKPOINT\" --host 0.0.0.0 --port 8080 --device \"$DECIDER_DEVICE\" $DECIDER_ARGS"]

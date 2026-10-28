@@ -8,7 +8,8 @@
     python -m training.hf_export index ROOT          (INDEX.json + INDEX.md of every export)
 
 CKPT, OUT, --run-dir and --jevbench may be local paths or s3:// URIs. The folder holds no
-pickles: `head.safetensors` is copied through, which `StrandsDeciderModel.load` reads.
+pickles: `head.safetensors` is copied through, which `StrandsDeciderModel.load` reads (a
+legacy checkpoint's `slot_head.pt` is converted to it, loaded with weights_only=True).
 Everything else strands-decider needs is copied byte for byte. A model
 card with Hub metadata, provenance, the run's timings and evals, and a sha256 manifest
 (written last) complete it. The run records (timings, eval reports, JevBench outputs) are
@@ -342,7 +343,26 @@ def _record(src: str, dst: str, literals: Sequence[str] = ()) -> None:
 
 # ---------------------------------------------------------------- the head
 # head.safetensors is written directly by `StrandsDeciderModel.save_pretrained`, so the
-# export copies it byte for byte (as a listed COPY file). No conversion step.
+# export copies it byte for byte (as a listed COPY file). The one conversion: a local
+# checkpoint trained before the slot-head removal holds the head as a `slot_head.pt` pickle,
+# which `load_head_state` still reads. The export (which holds no pickles) carries those
+# weights as head.safetensors; the checkpoint itself is left untouched.
+LEGACY_HEAD = "slot_head.pt"
+
+
+def _convert_legacy_head(ckpt: str, out: str) -> None:
+    """Write `ckpt`'s pickled head to `out`/head.safetensors, tensor for tensor."""
+    from safetensors.torch import save_file
+
+    from strands_decider.modeling import load_head_state
+
+    state = load_head_state(ckpt)  # torch.load(weights_only=True): no pickled code runs
+    os.makedirs(out, exist_ok=True)
+    save_file(
+        {k: v.detach().cpu().contiguous().clone() for k, v in state.items()},
+        os.path.join(out, "head.safetensors"),
+        metadata={"format": "pt"},
+    )
 
 
 # ---------------------------------------------------------------- evaluations
@@ -778,7 +798,17 @@ def build(
     example: str | None = None,
 ) -> dict:
     cfg_path = config_path(ckpt)
-    missing = [p for p in REQUIRED if not os.path.exists(os.path.join(ckpt, p))]
+    # A checkpoint with only the legacy pickled head is converted, not refused; head.safetensors
+    # wins when both exist, as in load_head_state.
+    legacy_head = not os.path.exists(os.path.join(ckpt, "head.safetensors")) and os.path.exists(
+        os.path.join(ckpt, LEGACY_HEAD)
+    )
+    missing = [
+        p
+        for p in REQUIRED
+        if not os.path.exists(os.path.join(ckpt, p))
+        and not (legacy_head and p == "head.safetensors")
+    ]
     if not os.path.exists(cfg_path):
         missing.insert(0, CONFIG_NAME)
     if missing:
@@ -807,6 +837,8 @@ def build(
             _record(src, os.path.join(out, p), redact)
         else:
             _copy(src, os.path.join(out, p))
+    if legacy_head:
+        _convert_legacy_head(ckpt, out)
     stages: list[dict] = []
     if run_dir:
         for src, dst in (("stages.jsonl", "stages.jsonl"), ("sha256.txt", "data_sha256.txt")):

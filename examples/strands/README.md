@@ -5,6 +5,12 @@ agent. The agent runs locally on the default Bedrock model plus the locally serv
 runs from a clone of the repository and expects a server on port 8099 unless
 `STRANDS_DECIDER_URL` is set.
 
+The example's client talks plain HTTP with no authentication and no AWS SigV4 signing, so it
+targets a decider server you run yourself (locally or on a private network). It cannot call a
+SageMaker endpoint, which requires signed requests; adding signing is left to you. Start the
+server with `--strict-window`: a prompt that does not fit the model's window is then refused
+rather than shortened, and the gate blocks the call instead of judging a cut-off one.
+
 **Prerequisites:** Strands drives the agent with an LLM call to Amazon Bedrock, so you need
 AWS credentials with Bedrock access in your environment before you run the example. See the
 [Strands Bedrock model provider docs](https://strandsagents.com/latest/documentation/docs/user-guide/concepts/model-providers/amazon-bedrock/)
@@ -13,7 +19,7 @@ for the supported credential options.
 ```bash
 git clone https://github.com/strands-labs/strands-decider && cd strands-decider
 pip install -e . strands-agents
-strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --port 8099 --strict-window
 
 python examples/strands/tool_call_intervention.py
 ```
@@ -33,6 +39,16 @@ conversation and the proposed call and answers two narrow yes/no questions about
 A few lines of plain Python turn those probabilities into a decision, and the agent goes back
 to ask which city you meant instead of confidently reporting the weather somewhere nobody
 mentioned.
+
+The policy fails closed. The call runs only when the decider is confident that the arguments are
+grounded and confident that the call is not premature. A probability in the `UNCERTAIN` band
+(0.35 to 0.65 here) is neither, so it sends the model back to the user with `Guide`. If the
+server cannot be reached, refuses the request, or returns something that is not a probability,
+the call is blocked with `Deny`, as is a call too large to fit the model's window. The proposed
+call is placed first in the state and the conversation after it, cut from its old end to fit, so
+a long conversation never costs the gate the tool name and arguments it is judging. Text from
+the conversation and the arguments is untrusted: markup that looks like the prompt's own tags is
+defused before it is sent.
 
 The seam is Strands' intervention system. You write an `InterventionHandler` with a
 `before_tool_call` method and pass it to the agent, and it runs before any tool executes. What

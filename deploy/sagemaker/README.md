@@ -103,11 +103,19 @@ npx cdk deploy -c model=StrandsAgents/strands-decider-E4B-gemma4-v1-2610 -c inst
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `model` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` | The strands-decider model, a Hugging Face Hub id ([Choosing a model](#choosing-a-model)). It also names the stack and the endpoint. |
-| `model_revision` | `main` | The model's revision. Use a release's date tag (`YYMMDD`) to pin it ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)). |
+| `model_revision` | `main` | The model's revision. `main` follows the branch, so a redeploy can fetch different weights. Pin it: a release's date tag (`YYMMDD`) ([docs/inference.md, Model artifact](../../docs/inference.md#model-artifact)), or better a full 40-character commit sha, which cannot be moved. The stack adds a CDK warning (shown by `cdk synth` and `cdk deploy`) whenever the value is not a commit sha. |
 | `instance_type` | `ml.g6.xlarge` | The SageMaker instance type ([Choosing an instance](#choosing-an-instance)) |
 | `instance_count` | `1` | Instances behind the endpoint |
 | `inference_ami_version` | empty | A SageMaker [inference AMI version](https://docs.aws.amazon.com/sagemaker/latest/dg/instance-types-ami.html) to pin the host AMI to, for GPU families outside the default AL2023 GPU AMI's compatibility list. Empty keeps the default (AL2023 on GPU, SageMaker default on CPU). |
 | `serve_args` | empty | More `strands-decider serve` options, such as `"--max-batch 8 --strict-window"` |
+
+The default `model_revision` is `main` so that a first deploy works with no setup. For anything
+you rely on, look up the commit on the model's Hub page (or `git ls-remote`) and pass it with
+`-c model_revision=<sha>`.
+
+The server inside the endpoint limits what one request can cost (request body, number of
+questions, characters of state and question, images, and forward passes at once). The defaults
+are in the module docstring of `src/strands_decider/server.py`; they also apply here.
 
 A change to a setting updates the endpoint in place: SageMaker moves traffic to the new
 endpoint config when it is ready.

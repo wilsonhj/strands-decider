@@ -90,9 +90,9 @@ Rank on JevBench ([External benchmark](jevbench.md#external-benchmark-jevbench-v
   throughput on long prompts ([Serving on a Mac](../docs/inference.md#serving-on-a-mac)). Through MLX it is
   1.4 to 1.6x faster than MPS, measured on an M4 Pro
   ([Serving on a Mac with MLX](../docs/inference.md#serving-on-a-mac-with-mlx)).
-- **A `slot` checkpoint caps a choice question at `num_slots` options** (24 by
-  default), where the reference API allows 255. The `pointer` readout used from v7 on
-  has no such cap.
+- **Slot-head checkpoints (v1 to v6) no longer load.** Their fixed grid capped a choice
+  question at 24 options, where the reference API allows 255. The pointer readout used
+  from v7 on, the only one this version loads, has no such cap.
 - **Trained on public datasets**, so it inherits their domains and their label noise. For
   a specific task, add a recipe with your own data.
 - **Do not rank models on this repo's own held-out corpus.** It measures fit to the

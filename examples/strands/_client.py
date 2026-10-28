@@ -4,6 +4,10 @@ Deliberately `urllib` rather than a client library: these examples should need n
 beyond `strands-agents`, so that a reader can drop one into their own project without
 first agreeing to a dependency.
 
+Plain HTTP and no authentication: this talks to a server you started yourself, on this
+machine or a private network (`STRANDS_DECIDER_URL`). It does not sign requests, so it cannot
+call a SageMaker endpoint (which needs AWS SigV4) or any server behind auth.
+
 Synchronous on purpose too. Strands calls a handler method that is a plain `def`
 directly, so a blocking request is the simplest thing that works -- and it keeps requests
 to the server strictly sequential, which is how it is best driven: one request at a time.
@@ -17,6 +21,7 @@ so a future rename is an edit to this block and nothing else.
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -47,7 +52,13 @@ DEFAULT_URL = os.environ.get(ENV_URL, f"http://127.0.0.1:{DEFAULT_PORT}")
 
 
 class ServerUnavailable(RuntimeError):
-    """The server is not answering. Raised with the command that starts one."""
+    """The server did not give a usable answer.
+
+    One exception for every way that can go wrong -- nothing listening, a timeout, an HTTP
+    error status (a request the server refused as too large or invalid is a 4xx), a reply
+    that is not the expected JSON -- so a caller that must not act on a missing answer has a
+    single thing to catch. Raised with the command that starts a server when none is there.
+    """
 
 
 class Decider:
@@ -114,19 +125,56 @@ class Decider:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read())
+            answers = payload["answers"]
+            if not isinstance(answers, dict):
+                raise TypeError("`answers` is not an object")
+        except urllib.error.HTTPError as exc:
+            # The server is up and said no: keep its reason, do not suggest starting one.
+            raise ServerUnavailable(
+                f"{NAME} at {self.url} answered HTTP {exc.code}: {self._detail(exc)}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise self._unavailable(exc) from exc
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            # A read timeout is a bare TimeoutError (OSError), not a URLError, and a
+            # truncated or non-JSON body is a ValueError.
+            raise ServerUnavailable(
+                f"{NAME} at {self.url} gave no usable answer ({type(exc).__name__}: {exc})"
+            ) from exc
         self.calls += 1
         self.input_tokens += payload.get("usage", {}).get("input_tokens", 0)
         self.last_latency_ms = payload.get("latency_ms")
-        return payload["answers"]
+        return answers
+
+    @staticmethod
+    def _detail(exc: urllib.error.HTTPError) -> str:
+        """The server's own explanation (FastAPI puts it under `detail`), kept short."""
+        try:
+            return str(json.loads(exc.read()).get("detail", exc.reason))[:300]
+        except (OSError, ValueError, AttributeError):
+            return str(exc.reason)
+
+    @staticmethod
+    def probability(answers: Mapping[str, Any], name: str) -> float:
+        """P(true) of the noul answer `name`, checked.
+
+        Raises ServerUnavailable if the answer is missing, is not a noul, or is not a
+        finite number in 0..1, so a malformed reply can never read as a confident yes.
+        """
+        try:
+            value = float(answers[name]["noul"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ServerUnavailable(f"{NAME} returned no noul answer for {name!r}") from exc
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ServerUnavailable(f"{NAME} returned {value!r} for {name!r}, not a probability")
+        return value
 
     def health(self) -> dict[str, Any]:
         """The loaded checkpoint, window and device. Raises if nothing is serving."""
         try:
             with urllib.request.urlopen(f"{self.url}/health", timeout=10) as response:
                 return json.loads(response.read())
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, OSError, ValueError) as exc:
             raise self._unavailable(exc) from exc
 
     def banner(self) -> str:

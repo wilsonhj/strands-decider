@@ -93,6 +93,29 @@ def test_reference_needs_the_precomputed_pass_and_the_kl_term(corpus, tmp_path, 
         _train(corpus, tmp_path, monkeypatch, kl_frozen_reference=str(tmp_path), **over)
 
 
+def test_precompute_without_group_by_length_is_refused_before_the_model_loads(
+    corpus, tmp_path, monkeypatch
+):
+    """The precomputed reference replays a known batch order, so the unordered loader is
+    refused up front rather than after the base model has been loaded."""
+
+    def no_load(*a, **k):
+        raise AssertionError("the model was loaded before the config was validated")
+
+    monkeypatch.setattr(StrandsDeciderModel, "from_pretrained_base", staticmethod(no_load))
+    cfg = T.TrainConfig(
+        train_files=[str(corpus / "a.jsonl")],
+        base_model="tiny",
+        kl_frozen_weight=0.3,
+        kl_frozen_reference="ref",
+        precompute_frozen_kl=True,
+        group_by_length=False,
+        output_dir=str(tmp_path),
+    )
+    with pytest.raises(ValueError, match="group_by_length"):
+        T.train(cfg)
+
+
 def test_weight_without_reference_is_refused(corpus, tmp_path, monkeypatch):
     """kl_frozen_weight > 0 needs a reference checkpoint: there is no base-torso fallback.
 

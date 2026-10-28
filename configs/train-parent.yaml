@@ -8,11 +8,8 @@ train_files: ["data/train_v5.jsonl", "data/multistep_v14.jsonl"]
 val_fraction: 0.03
 
 base_model: "Qwen/Qwen3.5-2B-Base"
-num_slots: 24           # must match `data build --max-options`; also the KL reference width
-head_type: "pointer"    # scores each option from its own hidden state; see modeling.PointerHead
 pointer_dim: 256
-head_init: "random"     # "lm_head" seeding applies to the slot head only
-kl_frozen_weight: 0.3   # KL(frozen || student) over the option-number readout
+kl_frozen_weight: 0.3   # base-torso anchor of the original run, since removed: now needs kl_frozen_reference
 # Teacher distributions for the multi-step rows only (indices offset past train_v5).
 teacher_file: "data/teacher_multistep_v14_train.jsonl"  # from training/recipe.sh teacher
 teacher_weight: 1.0

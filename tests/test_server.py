@@ -19,6 +19,7 @@ from strands_decider.prompting import render_question
 from strands_decider.schema import (
     ChoiceQuestion,
     NoulQuestion,
+    RequestError,
     ScoreQuestion,
     SystemOneRequest,
     SystemOneResponse,
@@ -105,7 +106,8 @@ def test_health_identifies_checkpoint(monkeypatch):
         "/health"
     )
     assert r.status_code == 200
-    assert r.json()["checkpoint"] == "checkpoints/strands-decider-test"
+    # The name of the folder, not its path: /health is open to every caller.
+    assert r.json()["checkpoint"] == "strands-decider-test"
     assert r.json()["max_length"] == 512
 
 
@@ -329,7 +331,7 @@ def test_too_many_options_returns_422(monkeypatch):
 
     class _NarrowEngine(_StubEngine):
         def evaluate(self, request):
-            raise ValueError("question has 30 options but this model has 24 slots")
+            raise RequestError("question has 30 options but this model has 24 slots")
 
     monkeypatch.setattr(
         server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
@@ -343,3 +345,138 @@ def test_too_many_options_returns_422(monkeypatch):
     )
     assert r.status_code == 422
     assert "24 slots" in r.json()["detail"]
+
+
+def _app(monkeypatch, engine_cls=_StubEngine, device="cpu", **kwargs):
+    monkeypatch.setattr(
+        server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel())
+    )
+    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: engine_cls())
+    return server.create_app("checkpoints/does-not-exist", device=device, **kwargs)
+
+
+NOUL = {"type": "noul", "instructions": "Yes?"}
+
+
+def test_internal_value_error_is_a_500_not_a_422(monkeypatch):
+    """Only RequestError blames the caller. A ValueError from inside the model is the
+    server's fault, and its message (tensor shapes, paths) is not for the caller."""
+
+    class _Broken(_StubEngine):
+        def evaluate(self, request):
+            raise ValueError("shape mismatch in layer 12 at /opt/ml/model/secret")
+
+    client = TestClient(_app(monkeypatch, _Broken), raise_server_exceptions=False)
+    r = client.post("/v1/systemone", json={"state": "x", "questions": {"q": NOUL}})
+    assert r.status_code == 500
+    assert "layer 12" not in r.text
+
+
+def test_body_over_the_limit_is_413(monkeypatch):
+    client = TestClient(_app(monkeypatch, max_body_bytes=1000))
+    big = {"state": "x" * 5000, "questions": {"q": NOUL}}
+    r = client.post("/v1/systemone", json=big)
+    assert r.status_code == 413
+    assert "1000" in r.json()["detail"]
+    small = {"state": "x" * 100, "questions": {"q": NOUL}}
+    assert client.post("/v1/systemone", json=small).status_code == 200
+
+
+def test_chunked_body_over_the_limit_is_413(monkeypatch):
+    """No Content-Length to check up front: the bytes are counted as they arrive."""
+    client = TestClient(_app(monkeypatch, max_body_bytes=1000))
+    payload = (
+        b'{"state": "'
+        + b"x" * 5000
+        + b'", "questions": {"q": {"type": "noul", "instructions": "y"}}}'
+    )
+
+    def chunks():
+        for i in range(0, len(payload), 256):
+            yield payload[i : i + 256]
+
+    r = client.post("/v1/systemone", content=chunks(), headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_size_limits_are_413(monkeypatch):
+    client = TestClient(
+        _app(
+            monkeypatch,
+            max_questions=2,
+            max_state_chars=50,
+            max_question_chars=300,
+            max_images=1,
+        )
+    )
+
+    def post(**fields):
+        body = {"state": "x", "questions": {"q": NOUL}} | fields
+        return client.post("/v1/systemone", json=body)
+
+    assert post().status_code == 200
+    r = post(questions={f"q{i}": NOUL for i in range(3)})
+    assert r.status_code == 413 and "questions" in r.json()["detail"]
+    r = post(state="y" * 51)
+    assert r.status_code == 413 and "state" in r.json()["detail"]
+    r = post(state={"k": "y" * 60})  # structured state is measured as rendered
+    assert r.status_code == 413
+    r = post(questions={"q": {"type": "noul", "instructions": "z" * 400}})
+    assert r.status_code == 413 and "'q'" in r.json()["detail"]
+    wide = {"type": "choice", "instructions": "x", "criteria": {"a": "d" * 200, "b": "d" * 200}}
+    assert post(questions={"q": wide}).status_code == 413  # option text counts
+    r = post(images=["aGk=", "aGk="])
+    assert r.status_code == 413 and "images" in r.json()["detail"]
+
+
+def test_limits_come_from_the_environment_and_arguments_win(monkeypatch):
+    monkeypatch.setenv("STRANDS_DECIDER_MAX_QUESTIONS", "1")
+    monkeypatch.setenv("STRANDS_DECIDER_MAX_IMAGES", "3")
+    client = TestClient(_app(monkeypatch, max_images=5))
+    limits = client.get("/health").json()["limits"]
+    assert limits["max_questions"] == 1
+    assert limits["max_images"] == 5
+    body = {"state": "x", "questions": {"a": NOUL, "b": NOUL}}
+    assert client.post("/v1/systemone", json=body).status_code == 413
+
+
+def test_bad_limit_settings_fail_at_startup(monkeypatch):
+    with pytest.raises(ValueError, match="at least 1"):
+        server.Limits.resolve(max_body_bytes=0)
+    monkeypatch.setenv("STRANDS_DECIDER_MAX_QUESTIONS", "lots")
+    with pytest.raises(ValueError, match="STRANDS_DECIDER_MAX_QUESTIONS"):
+        server.Limits.resolve()
+    monkeypatch.delenv("STRANDS_DECIDER_MAX_QUESTIONS")
+    with pytest.raises(ValueError, match="concurrency"):
+        _app(monkeypatch, max_concurrency=0)
+
+
+def _peak_concurrency(monkeypatch, *, device, requests=4, **kwargs):
+    """Peak simultaneous evaluate() calls when `requests` arrive together."""
+    EngineCls, state = _racing_engine_cls()
+    client = TestClient(_app(monkeypatch, EngineCls, device=device, **kwargs))
+    payload = {"state": "x", "questions": {"q": NOUL}}
+    with ThreadPoolExecutor(max_workers=requests) as pool:
+        futures = [pool.submit(client.post, "/v1/systemone", json=payload) for _ in range(requests)]
+        assert state["enter"].wait(timeout=2.0)
+        threading.Event().wait(0.3)  # let every request that can get in, get in
+        state["release"].set()
+        assert all(f.result(timeout=10.0).status_code == 200 for f in futures)
+    return state["peak"]
+
+
+def test_forward_concurrency_is_bounded_on_every_device(monkeypatch):
+    """CUDA and CPU used to run as many forwards as the threadpool had threads (40)."""
+    assert _peak_concurrency(monkeypatch, device="cuda") == 2
+    assert _peak_concurrency(monkeypatch, device="cpu") == 2
+
+
+def test_concurrency_is_configurable(monkeypatch):
+    assert _peak_concurrency(monkeypatch, device="cuda", max_concurrency=1) == 1
+    assert _peak_concurrency(monkeypatch, device="cuda", max_concurrency=3) == 3
+    monkeypatch.setenv("STRANDS_DECIDER_CONCURRENCY", "1")
+    assert _peak_concurrency(monkeypatch, device="cpu") == 1
+
+
+def test_mps_defaults_to_one(monkeypatch):
+    assert _peak_concurrency(monkeypatch, device="mps") == 1

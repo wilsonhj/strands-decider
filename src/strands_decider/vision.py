@@ -45,7 +45,15 @@ from .modeling import (
     pool_last_token,
 )
 from .prompting import RenderedQuestion, render_question, render_state
-from .schema import Answer, Content, Question, SystemOneRequest, SystemOneResponse, Usage
+from .schema import (
+    Answer,
+    Content,
+    Question,
+    RequestError,
+    SystemOneRequest,
+    SystemOneResponse,
+    Usage,
+)
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -125,15 +133,15 @@ def decode_image(data: str, max_pixels: int = 4096 * 4096) -> Image.Image:
     try:
         raw = base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as e:
-        raise ValueError(f"image is not valid base64: {e}") from e
+        raise RequestError(f"image is not valid base64: {e}") from e
     pil = _pil()
     try:
         img = pil.open(io.BytesIO(raw), formats=IMAGE_FORMATS)
     except Exception as e:
-        raise ValueError(f"image could not be read as {'/'.join(IMAGE_FORMATS)}: {e}") from e
+        raise RequestError(f"image could not be read as {'/'.join(IMAGE_FORMATS)}: {e}") from e
     w, h = img.size
     if w * h > max_pixels:
-        raise ValueError(f"image is {w}x{h}; at most {max_pixels:,} pixels are accepted")
+        raise RequestError(f"image is {w}x{h}; at most {max_pixels:,} pixels are accepted")
     from PIL import ImageOps
 
     try:
@@ -142,7 +150,7 @@ def decode_image(data: str, max_pixels: int = 4096 * 4096) -> Image.Image:
         # SyntaxError or struct.error here, which would otherwise surface as HTTP 500.
         img = ImageOps.exif_transpose(img)
     except Exception as e:
-        raise ValueError(f"image could not be decoded: {e}") from e
+        raise RequestError(f"image could not be decoded: {e}") from e
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
         white = pil.new("RGBA", rgba.size, (255, 255, 255, 255))
@@ -428,7 +436,7 @@ class VisionEngine(SystemOneEngine):
         if not request.images:
             return super().evaluate(request)
         if len(request.images) > self.vcfg.max_images:
-            raise ValueError(
+            raise RequestError(
                 f"{len(request.images)} images; this server takes at most {self.vcfg.max_images}"
             )
         images = [
@@ -501,7 +509,7 @@ class VisionEngine(SystemOneEngine):
 
         if self.cfg.strict_window:
             if len(s) + longest > max_len:
-                raise ValueError(
+                raise RequestError(
                     f"prompt of {len(s) + longest} tokens exceeds the context window "
                     f"of {max_len} tokens"
                 )
@@ -512,7 +520,7 @@ class VisionEngine(SystemOneEngine):
         q = [x[c:] for x, c in zip(q, cut, strict=True)]
         budget = max_len - reserve
         if keep > budget:
-            raise ValueError(
+            raise RequestError(
                 f"the images take {keep} tokens of a {budget}-token state budget; "
                 "send fewer or smaller images"
             )

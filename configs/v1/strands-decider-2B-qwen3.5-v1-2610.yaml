@@ -72,11 +72,8 @@ train_files: ["data/g28/data/train_v5_nc.jsonl", "data/g28/data/multistep_v14.js
 val_fraction: 0.03
 
 base_model: "Qwen/Qwen3.5-2B-Base"
-num_slots: 24           # must match `data build --max-options`; also the KL reference width
-head_type: "pointer"    # scores each option from its own hidden state; see modeling.PointerHead
 pointer_dim: 256
-head_init: "random"     # "lm_head" seeding applies to the slot head only
-kl_frozen_weight: 0.3   # KL(frozen || student) over the option-number readout
+kl_frozen_weight: 0.3   # KL(reference || student) weight; needs kl_frozen_reference + precompute_frozen_kl
 kl_frozen_reference: "checkpoints/v19-ref"  # the released v19, at temperature 1 (header)
 # gemma-4-31B-it's distributions where its answer agrees with the gold label (header).
 teacher_file: "data/teacher_g28.jsonl"

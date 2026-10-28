@@ -43,7 +43,7 @@ def _oos(ex: Example) -> bool:
 
 def transform(ex: Example, mode: str, rng: random.Random, max_options: int = 24) -> Example | None:
     """One catch-all row from `ex`; None if the row cannot take one. A row already at
-    `max_options` (the model's num_slots, the width of its training KL reference) gives
+    `max_options` (the cap `data build --max-options` puts on options per row) gives
     up one wrong option at random to make room for the catch-all."""
     if ex.kind != "choice" or _oos(ex) or any(n.lower() in NAMES for n, _ in ex.options):
         return None

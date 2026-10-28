@@ -60,7 +60,7 @@ def _examples(n: int, seed: int) -> list:
         if kind == "noul":
             options = [["false", _text(rng, 4)], ["true", _text(rng, 4)]]
         elif kind == "choice":
-            m = rng.choice([2, 3, 5, 11, 12])  # >9 options: no frozen-KL reference
+            m = rng.choice([2, 3, 5, 11, 12])  # wide rows: every row is KL-eligible
             options = [[f"opt{j}", _text(rng, 3)] for j in range(m)]
         else:
             m = rng.choice([3, 5])
@@ -527,6 +527,49 @@ def test_skipping_rows_matches_collating_them(corpus):
             c, mc = mid["input_ids"][j], mid["attention_mask"][j].bool()
             assert a[m].tolist() == c[mc].tolist()
             assert int(whole["labels"][3 + j]) == int(mid["labels"][j])
+
+
+def test_step_slices_weight_the_frozen_kl_by_rows(tmp_path, monkeypatch):
+    """Every row is covered by the frozen-KL reference, so a micro-batch's slices carry kl
+    shares summing to 1 (each its rows' fraction). A slot-count bound that no row met used to
+    leave every share at 0 and silently switch the multi-GPU frozen KL off."""
+    import torch.distributed as dist
+    from torch.utils.data import DataLoader
+
+    from training import distributed
+    from training.train import ExampleDataset
+
+    class Collate:
+        def skip(self, rows):
+            pass
+
+        def __call__(self, rows):
+            return {"n": len(rows)}
+
+    for var in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
+        monkeypatch.delenv(var, raising=False)
+    # One process, but cut every micro-batch into two slices as a split across ranks would.
+    monkeypatch.setattr(
+        distributed,
+        "plan_step",
+        lambda window, lengths, world: [[(j, a, b) for j in range(2) for a, b in ((0, 3), (3, 8))]],
+    )
+    rows = _examples(32, seed=3)
+    loader = DataLoader(
+        ExampleDataset(rows),
+        batch_sampler=[list(range(i, i + 8)) for i in range(0, 32, 8)],
+        collate_fn=Collate(),
+    )
+    dist.init_process_group("gloo", init_method=f"file://{tmp_path / 'pg'}", rank=0, world_size=1)
+    try:
+        parts = [b["part"] for b in distributed.StepSlices(loader, 2, 2)]
+    finally:
+        dist.destroy_process_group()
+    assert len(parts) == 8  # 2 steps x 2 micro-batches x 2 slices
+    for micro in range(4):
+        mine = [p for p in parts if p.micro == micro]
+        assert [p.kl for p in mine] == pytest.approx([3 / 8, 5 / 8])
+        assert sum(p.weights for p in mine) == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------- sharded labelling

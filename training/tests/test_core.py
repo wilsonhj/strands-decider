@@ -910,6 +910,34 @@ def test_slot_era_head_type_is_rejected_by_config_loader(tmp_path):
     assert cfg.base_model == "x"
 
 
+def test_config_loader_drops_retired_keys_but_raises_on_any_other(tmp_path):
+    """Retired slot-era keys are dropped silently; a typo or an unknown key is an error."""
+    path = tmp_path / "cfg.json"
+    retired = {
+        "num_slots": 24,
+        "head_hidden": 0,
+        "head_init": "random",
+        "kl_frozen_weight": 0.3,
+    }
+    path.write_text(json.dumps({"base_model": "x", "lora_r": 8, **retired}))
+    cfg = StrandsDeciderConfig.from_json(str(path))
+    assert (cfg.base_model, cfg.lora_r) == ("x", 8)
+    for bad in ({"lora_rr": 8}, {"max_lenght": 10}):  # typos of real fields
+        path.write_text(json.dumps({"base_model": "x", **retired, **bad}))
+        with pytest.raises(ValueError, match=next(iter(bad))):
+            StrandsDeciderConfig.from_json(str(path))
+
+
+def test_retired_keys_are_shared_with_the_train_config():
+    """TrainConfig drops the same slot-era keys as the model config (it also drops head_type)."""
+    from strands_decider.modeling import RETIRED_CONFIG_KEYS, SLOT_ERA_KEYS
+    from training.train import RETIRED_YAML_KEYS
+
+    assert SLOT_ERA_KEYS <= RETIRED_YAML_KEYS
+    assert SLOT_ERA_KEYS <= RETIRED_CONFIG_KEYS
+    assert not RETIRED_CONFIG_KEYS & set(StrandsDeciderConfig.__dataclass_fields__)
+
+
 def test_head_type_is_written_to_the_exported_config():
     """Older strands-decider versions default a missing head_type to slot and crash on a
     pointer export, and out-of-tree readers may parse this field directly."""

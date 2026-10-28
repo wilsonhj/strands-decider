@@ -44,9 +44,9 @@ training text and serving text is a distribution shift.
 - Keep the split keys in a side file, not in the row: `work/<set>/keys.jsonl`, one line per row with
   the row index, the group id (customer, document, conversation) and the timestamp.
 - Use the same option set for one decision in every row, in the same canonical order.
-- Many options: keep the training config's `num_slots` at least the largest option count, or
-  subsample options per row and always keep the gold one (`python -m training.data build
-  --max-options` does this for the public corpus).
+- Many options: the pointer head has no option cap, but the longer the option list the longer the
+  prompt, so subsample options per row and always keep the gold one if the list is long
+  (`python -m training.data build --max-options` does this for the public corpus).
 
 ## The row check (run on every file before it is frozen)
 

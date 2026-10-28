@@ -11,8 +11,8 @@ checkpoint (a Hub id or a local directory) and trains its LoRA adapter and its h
 rows. `training/README.md`, "Fine-tuning a released model with `init_from`", has the details. The
 points that matter here:
 
-- The checkpoint fixes the architecture. Leave `base_model`, `num_slots`, `head_type`,
-  `pointer_dim`, `head_hidden`, `use_lora`, `lora_r`, `lora_alpha`, `lora_targets` and `force_bos`
+- The checkpoint fixes the architecture. Leave `base_model`,
+  `pointer_dim`, `use_lora`, `lora_r`, `lora_alpha`, `lora_targets` and `force_bos`
   out of the config: a config that sets one of them stops before the model loads, even at a value
   that looks harmless. Do not start from a copy of `configs/train.yaml`.
 - Released models are soups, so the adapter has rank 48 (three seeds of rank 16). A soup of three
